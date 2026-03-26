@@ -1,5 +1,10 @@
+.env
+*.db
+materials_files/
+backups/
+__pycache__/
+*.pyc
 
 # Beads / Dolt files (added by bd init)
 .dolt/
-*.db
 .beads-credential-key
