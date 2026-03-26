@@ -260,6 +260,14 @@ def list_broadcasts():
     return {"total": len(broadcasts), "broadcasts": broadcasts}
 
 
+@app.delete("/broadcasts/{broadcast_id}", summary="Удалить эфир", dependencies=[Depends(_check_api_key)])
+def delete_broadcast(broadcast_id: int):
+    if not storage.get_broadcast(broadcast_id):
+        raise HTTPException(status_code=404, detail="Эфир не найден")
+    storage.delete_broadcast(broadcast_id)
+    return {"message": f"Эфир {broadcast_id} и все его материалы удалены."}
+
+
 # --- Материалы ---
 
 @app.post("/materials/{broadcast_id}", summary="Добавить ссылку к эфиру", dependencies=[Depends(_check_api_key)])
@@ -312,6 +320,14 @@ def list_materials(broadcast_id: int):
         raise HTTPException(status_code=404, detail="Эфир не найден")
     materials = storage.get_materials(broadcast_id)
     return {"broadcast_id": broadcast_id, "total": len(materials), "materials": materials}
+
+
+@app.delete("/materials/{broadcast_id}/{material_id}", summary="Удалить материал", dependencies=[Depends(_check_api_key)])
+def delete_material(broadcast_id: int, material_id: int):
+    if not storage.get_broadcast(broadcast_id):
+        raise HTTPException(status_code=404, detail="Эфир не найден")
+    storage.delete_material(material_id)
+    return {"message": f"Материал {material_id} удалён."}
 
 
 @app.get("/files/{filename}", summary="Скачать файл материала")

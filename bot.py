@@ -544,6 +544,7 @@ def manage_materials():
         print(c("  3", B, C) + c("  →  ", D) + c("Добавить файл к эфиру (PDF, docx)",   W))
         print(c("  4", B, C) + c("  →  ", D) + c("Посмотреть материалы эфира",          W))
         print(c("  5", B, C) + c("  →  ", D) + c("Удалить материал",                    W))
+        print(c("  6", B, C) + c("  →  ", D) + c("Удалить эфир",                        W))
         print(c("  0", B, D) + c("  →  ", D) + c("Назад",                               D))
         line()
 
@@ -656,10 +657,25 @@ def manage_materials():
             else:
                 warn("Неверный номер.")
 
+        elif choice == "6":
+            bid = _pick_broadcast()
+            if not bid:
+                continue
+            broadcast = storage.get_broadcast(bid)
+            materials = storage.get_materials(bid)
+            print()
+            warn(f"Эфир «{broadcast['name']}» и все его материалы ({len(materials)} шт.) будут удалены!")
+            confirm = ask("Точно удалить? (да / нет)")
+            if confirm.lower() in ("да", "y", "yes", "д"):
+                storage.delete_broadcast(bid)
+                ok(f"Эфир «{broadcast['name']}» удалён.")
+            else:
+                info("Отменено.")
+
         elif choice == "0":
             break
         else:
-            warn("Введи цифру от 0 до 5.")
+            warn("Введи цифру от 0 до 6.")
 
 
 def _pick_bot() -> str:
