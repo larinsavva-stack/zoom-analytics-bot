@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "zoom",
+  "project_id": "599b2ddd-07f2-4b2c-b7ae-cc9b600f5cf2"
+}
