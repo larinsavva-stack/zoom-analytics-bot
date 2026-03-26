@@ -24,14 +24,25 @@ import os
 import shutil
 import time
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import Optional
 
 import recall_client
 import storage
 from config import SERVER_PORT, WEBHOOK_BASE_URL, MATERIALS_DIR
+
+API_KEY = os.environ.get("API_KEY", "")
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _check_api_key(key: str = Security(_api_key_header)):
+    if not API_KEY:
+        return
+    if key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
 
 app = FastAPI(
     title="Zoom Analytics Bot",
@@ -65,7 +76,7 @@ class MaterialRequest(BaseModel):
 
 # --- Эндпоинты ---
 
-@app.post("/send-bot", summary="Отправить бота на встречу")
+@app.post("/send-bot", summary="Отправить бота на встречу", dependencies=[Depends(_check_api_key)])
 def send_bot(req: SendBotRequest):
     """
     Отправляет бота на Zoom встречу.
@@ -89,13 +100,13 @@ def send_bot(req: SendBotRequest):
     }
 
 
-@app.get("/bots", summary="Список всех сессий")
+@app.get("/bots", summary="Список всех сессий", dependencies=[Depends(_check_api_key)])
 def list_bots():
     """Возвращает список всех встреч из локальной БД."""
     return storage.list_meetings()
 
 
-@app.get("/status/{bot_id}", summary="Статус бота")
+@app.get("/status/{bot_id}", summary="Статус бота", dependencies=[Depends(_check_api_key)])
 def get_status(bot_id: str):
     """Текущий статус бота из Recall.ai (joining / in_call / done и т.д.)."""
     try:
@@ -115,7 +126,7 @@ def get_status(bot_id: str):
     }
 
 
-@app.post("/stop/{bot_id}", summary="Остановить бота")
+@app.post("/stop/{bot_id}", summary="Остановить бота", dependencies=[Depends(_check_api_key)])
 def stop_bot(bot_id: str):
     """Заставить бота покинуть встречу."""
     try:
@@ -127,7 +138,7 @@ def stop_bot(bot_id: str):
     return {"message": f"Бот {bot_id} покинул встречу."}
 
 
-@app.post("/sync/{bot_id}", summary="Синхронизировать данные из Recall.ai")
+@app.post("/sync/{bot_id}", summary="Синхронизировать данные из Recall.ai", dependencies=[Depends(_check_api_key)])
 def sync_data(bot_id: str):
     """
     Подтягивает чат и события участников из Recall.ai в локальную БД.
@@ -147,7 +158,7 @@ def sync_data(bot_id: str):
     }
 
 
-@app.get("/chat/{bot_id}", summary="Сообщения чата")
+@app.get("/chat/{bot_id}", summary="Сообщения чата", dependencies=[Depends(_check_api_key)])
 def get_chat(bot_id: str):
     """Возвращает все сообщения чата встречи из локальной БД."""
     messages = storage.get_chat_messages(bot_id)
@@ -158,7 +169,7 @@ def get_chat(bot_id: str):
     }
 
 
-@app.get("/participants/{bot_id}", summary="События участников")
+@app.get("/participants/{bot_id}", summary="События участников", dependencies=[Depends(_check_api_key)])
 def get_participants(bot_id: str):
     """Все события входа/выхода участников с временными метками."""
     events = storage.get_participant_events(bot_id)
@@ -171,7 +182,7 @@ def get_participants(bot_id: str):
     }
 
 
-@app.get("/timeline/{bot_id}", summary="Хронология участников")
+@app.get("/timeline/{bot_id}", summary="Хронология участников", dependencies=[Depends(_check_api_key)])
 def get_timeline(bot_id: str):
     """
     Хронология изменения количества участников.
@@ -184,7 +195,7 @@ def get_timeline(bot_id: str):
     }
 
 
-@app.get("/recording/{bot_id}", summary="Ссылка на аудио запись")
+@app.get("/recording/{bot_id}", summary="Ссылка на аудио запись", dependencies=[Depends(_check_api_key)])
 def get_recording(bot_id: str):
     """Получить URL аудио записи встречи (доступен после обработки)."""
     try:
@@ -197,7 +208,7 @@ def get_recording(bot_id: str):
     return {"url": url}
 
 
-@app.get("/export/{bot_id}", summary="Экспорт всех данных")
+@app.get("/export/{bot_id}", summary="Экспорт всех данных", dependencies=[Depends(_check_api_key)])
 def export_data(bot_id: str, format: str = "json"):
     """
     Экспорт всех данных встречи.
@@ -235,13 +246,13 @@ def export_data(bot_id: str, format: str = "json"):
 
 # --- Эфиры (broadcasts) ---
 
-@app.post("/broadcasts", summary="Создать эфир")
+@app.post("/broadcasts", summary="Создать эфир", dependencies=[Depends(_check_api_key)])
 def create_broadcast(req: BroadcastRequest):
     broadcast_id = storage.create_broadcast(req.name)
     return {"id": broadcast_id, "name": req.name, "message": f"Эфир '{req.name}' создан."}
 
 
-@app.get("/broadcasts", summary="Список эфиров")
+@app.get("/broadcasts", summary="Список эфиров", dependencies=[Depends(_check_api_key)])
 def list_broadcasts():
     broadcasts = storage.list_broadcasts()
     for b in broadcasts:
@@ -251,7 +262,7 @@ def list_broadcasts():
 
 # --- Материалы ---
 
-@app.post("/materials/{broadcast_id}", summary="Добавить ссылку к эфиру")
+@app.post("/materials/{broadcast_id}", summary="Добавить ссылку к эфиру", dependencies=[Depends(_check_api_key)])
 def add_material(broadcast_id: int, req: MaterialRequest):
     if not storage.get_broadcast(broadcast_id):
         raise HTTPException(status_code=404, detail="Эфир не найден")
@@ -261,7 +272,7 @@ def add_material(broadcast_id: int, req: MaterialRequest):
     return {"id": material_id, "message": f"Материал '{req.title}' добавлен."}
 
 
-@app.post("/materials/{broadcast_id}/upload", summary="Загрузить файл к эфиру")
+@app.post("/materials/{broadcast_id}/upload", summary="Загрузить файл к эфиру", dependencies=[Depends(_check_api_key)])
 async def upload_material(
     broadcast_id: int,
     file: UploadFile = File(...),
@@ -295,7 +306,7 @@ async def upload_material(
     return {"id": material_id, "filename": safe_filename, "url": file_url}
 
 
-@app.get("/materials/{broadcast_id}", summary="Список материалов эфира")
+@app.get("/materials/{broadcast_id}", summary="Список материалов эфира", dependencies=[Depends(_check_api_key)])
 def list_materials(broadcast_id: int):
     if not storage.get_broadcast(broadcast_id):
         raise HTTPException(status_code=404, detail="Эфир не найден")
