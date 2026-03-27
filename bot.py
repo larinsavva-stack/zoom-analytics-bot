@@ -839,14 +839,24 @@ def live_monitor(bot_id: str):
                 for ev in chat_msgs:
                     name   = ev.get("participant", {}).get("name", "?")
                     text   = ev.get("data", {}).get("text", "")
+                    to     = ev.get("data", {}).get("to", "everyone")
                     ts_raw = ev.get("timestamp", {})
                     if isinstance(ts_raw, dict):
                         ts_raw = ts_raw.get("absolute", "")
-                    key = ("chat", name, text[:50], str(ts_raw))
+                    key = ("chat", name, str(ts_raw))
                     if key not in seen_events and text:
                         seen_events.add(key)
                         chat_count += 1
-                        add_log(f"  msg  {c(name[:16] + ':', B, W)} {text[:35]}")
+                        try:
+                            ts_str = str(ts_raw).replace("Z", "+00:00")
+                            dt_ev  = datetime.fromisoformat(ts_str)
+                            if dt_ev.tzinfo is None:
+                                dt_ev = dt_ev.replace(tzinfo=timezone.utc)
+                            time_label = dt_ev.astimezone(MSK).strftime("%H:%M")
+                        except Exception:
+                            time_label = "—:—"
+                        private_tag = c(" [приватное]", Y) if to != "everyone" else ""
+                        log_entries.append((time_label, f"{c(name[:20] + ':', B, W)} {text}{private_tag}"))
 
             except Exception as e:
                 add_log(f"{c('Ошибка API:', RE)} {str(e)[:38]}")
