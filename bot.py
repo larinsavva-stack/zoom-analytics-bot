@@ -751,11 +751,15 @@ def manage_materials():
 def live_monitor(bot_id: str):
     """Мониторинг встречи в реальном времени через polling Recall.ai API."""
     POLL_INTERVAL = 12
+    STATUS_INTERVAL = 30
 
     seen_events: set = set()
     log_entries: list = []
     participant_count = 0
+    chat_count = 0
     status_code = ""
+    start_time = datetime.now(MSK)
+    last_status_time = time.time()
 
     def add_log(text: str):
         ts = datetime.now(MSK).strftime("%H:%M:%S")
@@ -841,10 +845,26 @@ def live_monitor(bot_id: str):
                     key = ("chat", name, text[:50], str(ts_raw))
                     if key not in seen_events and text:
                         seen_events.add(key)
+                        chat_count += 1
                         add_log(f"  msg  {c(name[:16] + ':', B, W)} {text[:35]}")
 
             except Exception as e:
                 add_log(f"{c('Ошибка API:', RE)} {str(e)[:38]}")
+
+            now_ts = time.time()
+            if now_ts - last_status_time >= STATUS_INTERVAL:
+                last_status_time = now_ts
+                now_str = datetime.now(MSK).strftime("%H:%M")
+                elapsed = int((datetime.now(MSK) - start_time).total_seconds())
+                mins, secs = divmod(elapsed, 60)
+                dur_str = f"{mins:02d}:{secs:02d}" if elapsed < 3600 else f"{elapsed//3600:02d}:{mins%60:02d}:{secs:02d}"
+                bar = (
+                    f"{c('──', D)} {c(now_str, C, B)} {c('│', D)} "
+                    f"{c('Участников:', D)} {c(str(participant_count), W, B)} {c('│', D)} "
+                    f"{c('Сообщений:', D)} {c(str(chat_count), W, B)} {c('│', D)} "
+                    f"{c('Длительность:', D)} {c(dur_str, W, B)} {c('──', D)}"
+                )
+                log_entries.append(("", bar))
 
             render()
 
