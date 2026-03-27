@@ -387,6 +387,97 @@ def check_status():
             print(f"  {c(ts, D)}  {c(s['code'], D)}")
 
 
+def show_participant_chart(join_leave: list):
+    """ASCII-график количества участников по времени встречи."""
+    if not join_leave:
+        return
+
+    timeline = []
+    count = 0
+    max_count = 0
+    for ev in join_leave:
+        action = ev.get("action", "")
+        raw_ts = ev.get("timestamp", {})
+        if isinstance(raw_ts, dict):
+            raw_ts = raw_ts.get("absolute", "")
+        try:
+            raw_ts = str(raw_ts).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(raw_ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(MSK)
+        except Exception:
+            continue
+        if action == "join":
+            count += 1
+            max_count = max(max_count, count)
+        else:
+            count = max(0, count - 1)
+        timeline.append((dt, count))
+
+    if not timeline:
+        return
+
+    def count_at(target_dt):
+        result = 0
+        for ev in join_leave:
+            raw = ev.get("timestamp", {})
+            if isinstance(raw, dict):
+                raw = raw.get("absolute", "")
+            try:
+                raw = str(raw).replace("Z", "+00:00")
+                dt  = datetime.fromisoformat(raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.astimezone(MSK)
+            except Exception:
+                continue
+            if dt <= target_dt:
+                if ev.get("action") == "join":
+                    result += 1
+                else:
+                    result = max(0, result - 1)
+        return result
+
+    start_dt = min(dt for dt, _ in timeline)
+    end_dt   = max(dt for dt, _ in timeline)
+    duration = end_dt - start_dt
+
+    print()
+    line()
+    print(c("  ГРАФИК УЧАСТНИКОВ ПО ВРЕМЕНИ", C, B))
+    line()
+    print(c("  От старта встречи:", D))
+    t    = start_dt
+    step = timedelta(minutes=30)
+    while t <= end_dt:
+        cnt     = count_at(t)
+        elapsed = int((t - start_dt).total_seconds() // 60)
+        bar     = c("█" * cnt + "·" * max(0, max_count - cnt), G if cnt > 0 else D)
+        print(f"  +{elapsed:>3} мин  {t.strftime('%H:%M')}  {bar}  {c(str(cnt), W, B)} чел.")
+        t += step
+    if (end_dt - start_dt).total_seconds() % 1800 != 0:
+        cnt     = count_at(end_dt)
+        elapsed = int(duration.total_seconds() // 60)
+        bar     = c("█" * cnt + "·" * max(0, max_count - cnt), G if cnt > 0 else D)
+        print(f"  +{elapsed:>3} мин  {end_dt.strftime('%H:%M')}  {bar}  {c(str(cnt), W, B)} чел.  {c('← конец', D)}")
+
+    print()
+    print(c("  От конца встречи:", D))
+    for mins_before in [30, 15, 10, 5]:
+        t = end_dt - timedelta(minutes=mins_before)
+        if t >= start_dt:
+            cnt = count_at(t)
+            bar = c("█" * cnt + "·" * max(0, max_count - cnt), G if cnt > 0 else D)
+            print(f"  −{mins_before:>3} мин  {t.strftime('%H:%M')}  {bar}  {c(str(cnt), W, B)} чел.")
+
+    print()
+    line()
+    ok(f"Пик:       {c(str(max_count), C, B)} участников одновременно")
+    ok(f"Длительность: {c(str(int(duration.total_seconds()//60)), C, B)} минут")
+    line()
+
+
 def sync_and_show():
     section("ЧАТ И УЧАСТНИКИ")
     bot_id = _pick_bot()
@@ -456,67 +547,7 @@ def sync_and_show():
             except Exception:
                 pass
 
-        # ── Аналитика срезов ──────────────────────────────────
-        if timeline:
-            print()
-            line()
-            print(c("  АНАЛИТИКА ПО ВРЕМЕНИ", C, B))
-            line()
-
-            def count_at(target_dt):
-                result = 0
-                for ev in join_leave:
-                    raw = ev.get("timestamp", {})
-                    if isinstance(raw, dict):
-                        raw = raw.get("absolute", "")
-                    try:
-                        raw = str(raw).replace("Z", "+00:00")
-                        dt  = datetime.fromisoformat(raw)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        dt = dt.astimezone(MSK)
-                    except Exception:
-                        continue
-                    if dt <= target_dt:
-                        if ev.get("action") == "join":
-                            result += 1
-                        else:
-                            result = max(0, result - 1)
-                return result
-
-            start_dt = min(dt for dt, _ in timeline)
-            end_dt   = max(dt for dt, _ in timeline)
-            duration = end_dt - start_dt
-
-            print(c("  От старта встречи:", D))
-            t    = start_dt
-            step = timedelta(minutes=30)
-            while t <= end_dt:
-                cnt     = count_at(t)
-                elapsed = int((t - start_dt).total_seconds() // 60)
-                bar     = c("█" * cnt + "·" * max(0, max_count - cnt), G if cnt > 0 else D)
-                print(f"  +{elapsed:>3} мин  {t.strftime('%H:%M')}  {bar}  {c(str(cnt), W, B)} чел.")
-                t += step
-            if (end_dt - start_dt).total_seconds() % 1800 != 0:
-                cnt     = count_at(end_dt)
-                elapsed = int(duration.total_seconds() // 60)
-                bar     = c("█" * cnt + "·" * max(0, max_count - cnt), G if cnt > 0 else D)
-                print(f"  +{elapsed:>3} мин  {end_dt.strftime('%H:%M')}  {bar}  {c(str(cnt), W, B)} чел.  {c('← конец', D)}")
-
-            print()
-            print(c("  От конца встречи:", D))
-            for mins_before in [30, 15, 10, 5]:
-                t = end_dt - timedelta(minutes=mins_before)
-                if t >= start_dt:
-                    cnt = count_at(t)
-                    bar = c("█" * cnt + "·" * max(0, max_count - cnt), G if cnt > 0 else D)
-                    print(f"  −{mins_before:>3} мин  {t.strftime('%H:%M')}  {bar}  {c(str(cnt), W, B)} чел.")
-
-            print()
-            line()
-            ok(f"Пик:       {c(str(max_count), C, B)} участников одновременно")
-            ok(f"Длительность: {c(str(int(duration.total_seconds()//60)), C, B)} минут")
-            line()
+        show_participant_chart(join_leave)
     else:
         print()
         info("Нет данных об участниках")
@@ -804,6 +835,7 @@ def live_monitor(bot_id: str):
         print(c("  Ctrl+C — выйти из мониторинга (бот продолжит работу)", D))
 
     add_log(f"{c('Мониторинг запущен', G)}  ·  Bot: {c(bot_id[:20], D)}")
+    _final_join_leave = None
 
     try:
         while True:
@@ -885,6 +917,7 @@ def live_monitor(bot_id: str):
                     jl   = [e for e in p_ev if e.get("action") in ("join", "leave")]
                     ch   = [e for e in p_ev if e.get("action") == "chat_message"]
                     names = len({e.get("participant", {}).get("name") for e in jl})
+                    _final_join_leave = jl
                     add_log(f"{c('Данные сохранены:', G, B)} участников: {c(str(names), W, B)} · сообщений: {c(str(len(ch)), W, B)}")
                 render()
                 time.sleep(3)
@@ -910,6 +943,9 @@ def live_monitor(bot_id: str):
     else:
         info("Мониторинг остановлен. Бот продолжает работу.")
     print()
+
+    if _final_join_leave:
+        show_participant_chart(_final_join_leave)
 
 
 def _pick_bot() -> str:
