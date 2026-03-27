@@ -4,27 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Что это
 
-Бот-аналитика для Zoom встреч через Recall.ai API. Собирает чат, события участников (join/leave), записи аудио/видео. Два интерфейса: HTTP API (FastAPI) и интерактивный терминал (CLI).
+Бот-аналитика для Zoom встреч через Recall.ai API. Собирает чат, события участников (join/leave), записи аудио/видео. Управление эфирами (broadcasts) и материалами к ним. Два интерфейса: HTTP API (FastAPI) и интерактивный терминал (CLI). Деплоится на Railway.
 
 ## Команды
 
 ```bash
-# Установка зависимостей
 pip install -r requirements.txt
 
-# Запуск HTTP API сервера (порт 8000, hot reload)
+# HTTP API сервер (Railway или локально)
 python main.py
-# или: uvicorn main:app --reload --port 8000
 
-# Запуск интерактивного CLI
+# Интерактивный CLI (только локально)
 python bot.py
 ```
 
-Swagger UI доступен на http://localhost:8000/docs
+Swagger UI: `/docs` на сервере.
 
 ## Архитектура
-
-Два независимых entry point работают с общим storage и recall_client:
 
 ```
 main.py ──────┐
@@ -35,17 +31,29 @@ bot.py  ──────┤
 config.py ── переменные окружения (.env)
 ```
 
-**main.py** — FastAPI сервер. REST API для управления ботами: отправка на встречу, синхронизация данных, экспорт в JSON/CSV. Инициализирует БД при старте.
+**main.py** — FastAPI сервер. REST API: управление ботами, синхронизация данных, экспорт JSON/CSV, CRUD эфиров и материалов, раздача файлов. Защищён API-ключом (env `API_KEY`, header `X-API-Key`). Без `API_KEY` — API открыт.
 
-**bot.py** — CLI с интерактивным меню (ANSI-цвета, пронумерованные пункты). Имеет собственную логику парсинга данных Recall.ai (`_fetch_and_save`), отличную от `sync_from_recall` в storage.py. Фоновый поток `_watch_and_save` автоматически сохраняет данные после завершения встречи. При запуске `_auto_sync_pending` досинхронизирует пропущенные встречи.
+**bot.py** — CLI с интерактивным меню (ANSI-цвета). Своя логика парсинга данных Recall.ai (`_fetch_and_save`), отличная от `sync_from_recall` в storage.py. Фоновый поток `_watch_and_save` автоматически сохраняет данные. `_auto_sync_pending` при запуске досинхронизирует пропущенные встречи.
 
-**recall_client.py** — синхронный HTTP-клиент к Recall.ai API (httpx). Все методы создают новый `httpx.Client` на каждый запрос. Чат и участники приходят через `download_url` из объекта recordings, а не через прямые эндпоинты.
+**recall_client.py** — синхронный HTTP-клиент (httpx). Каждый метод создаёт новый `httpx.Client`. Чат и участники приходят через `download_url` из recordings, не через прямые эндпоинты.
 
-**storage.py** — SQLite через context manager `get_db()`. Три таблицы: `meetings`, `participant_events`, `chat_messages`. Дедупликация через SELECT перед INSERT (не через UNIQUE constraint). Два пути записи данных: `save_chat_message`/`save_participant_event` (из bot.py) и `sync_from_recall` (из main.py) — парсят разные форматы Recall.ai ответов.
+**storage.py** — SQLite через context manager `get_db()`. Таблицы: `meetings`, `participant_events`, `chat_messages`, `broadcasts`, `materials`. Дедупликация через SELECT перед INSERT. Два пути записи: bot.py и main.py парсят разные форматы Recall.ai.
+
+## Деплой (Railway)
+
+- Сервер: `web-production-a00f0.up.railway.app`
+- Volume `/data` для персистентных данных
+- Env: `RECALL_API_KEY`, `API_KEY`, `DB_PATH=/data/analytics.db`, `MATERIALS_DIR=/data/materials_files`
+- Конфиги: `Procfile`, `railway.toml`, `runtime.txt` (Python 3.11.9)
+- Push в main → автодеплой
 
 ## Особенности
 
-- Формат данных Recall.ai неоднороден: timestamp может быть строкой или dict с полем `absolute`, participant может быть вложенным объектом или плоским. Оба парсера (bot.py и storage.py) обрабатывают это по-разному.
-- `backups/` — JSON-бэкапы сырых данных Recall.ai, создаются только из bot.py.
-- Все timestamps в БД хранятся в UTC (ISO 8601). bot.py конвертирует в МСК (UTC+3) только для отображения.
+- Формат данных Recall.ai неоднороден: timestamp может быть строкой или dict с `absolute`, participant может быть вложенным или плоским. Оба парсера обрабатывают это по-разному.
+- `backups/` — JSON-бэкапы сырых данных, только из bot.py.
+- Timestamps в БД: UTC (ISO 8601). bot.py конвертирует в МСК (UTC+3) для отображения.
 - Тесты и линтер не настроены.
+
+## TODO (в beads)
+
+Функция чат-ответов бота участникам Zoom (webhook + send_chat_message) — временно убрана из кода, не доработана. Задачи на доработку в beads (`bd list --status=open`).

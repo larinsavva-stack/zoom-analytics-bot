@@ -15,14 +15,13 @@ def _headers() -> dict:
     }
 
 
-def send_bot(meeting_url: str, bot_name: Optional[str] = None, webhook_url: Optional[str] = None) -> dict:
+def send_bot(meeting_url: str, bot_name: Optional[str] = None) -> dict:
     """
     Отправить бота на Zoom встречу.
 
     Args:
         meeting_url: URL встречи, например https://zoom.us/j/12345?pwd=abc
         bot_name: Имя бота в списке участников (по умолчанию из config)
-        webhook_url: URL для real-time webhook (если задан — включает чат-ответы)
 
     Returns:
         dict с bot_id и статусом
@@ -39,15 +38,6 @@ def send_bot(meeting_url: str, bot_name: Optional[str] = None, webhook_url: Opti
         },
         "chat": {}
     }
-
-    if webhook_url:
-        payload["recording_config"]["realtime_endpoints"] = [
-            {
-                "type": "webhook",
-                "url": webhook_url,
-                "events": ["participant_events.chat_message"],
-            }
-        ]
 
     with httpx.Client(timeout=30) as client:
         response = client.post(
@@ -173,21 +163,6 @@ def get_recording_url(bot_id: str) -> Optional[str]:
     return (
         shortcuts.get("video_mixed", {}).get("data", {}).get("download_url")
     )
-
-
-def send_chat_message(bot_id: str, message: str, to: Optional[str] = None) -> dict:
-    """Отправить сообщение в чат Zoom встречи через бота."""
-    payload = {"message": message}
-    if to:
-        payload["to"] = to
-    with httpx.Client(timeout=15) as client:
-        response = client.post(
-            f"{RECALL_BASE_URL}/bot/{bot_id}/send_chat_message",
-            json=payload,
-            headers=_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
 
 
 def list_bots() -> list[dict]:

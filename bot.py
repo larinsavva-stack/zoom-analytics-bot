@@ -12,7 +12,7 @@ from typing import Optional
 import shutil
 import recall_client
 import storage
-from config import WEBHOOK_BASE_URL, MATERIALS_DIR
+from config import MATERIALS_DIR
 
 storage.init_db()
 
@@ -246,9 +246,8 @@ def send_bot():
 
     print()
     info("Подключаюсь к Recall.ai...")
-    webhook_url = f"{WEBHOOK_BASE_URL}/webhook/chat" if WEBHOOK_BASE_URL else None
     try:
-        result = recall_client.send_bot(url, bot_name, webhook_url=webhook_url)
+        result = recall_client.send_bot(url, bot_name)
     except Exception as e:
         err(f"Не удалось отправить бота: {e}")
         return
@@ -596,7 +595,7 @@ def manage_materials():
             shutil.copy2(fpath, dest)
             ok(f"Файл скопирован: {safe_filename}")
 
-            file_url = f"{WEBHOOK_BASE_URL}/files/{safe_filename}" if WEBHOOK_BASE_URL else f"/files/{safe_filename}"
+            file_url = f"/files/{safe_filename}"
             title = ask(f"Название (Enter = {filename})") or filename
             content = ask("Описание")
             keywords = ask("Ключевые слова (через запятую)")
@@ -712,11 +711,6 @@ def main():
     print(c("║", C) + c("           ZOOM  ANALYTICS  BOT  v1.0         ", B, W) + c("  ║", C))
     print(c("║", C) + c("                  Время: МСК (UTC+3)                ", D) + c("║", C))
     dline()
-
-    if not WEBHOOK_BASE_URL:
-        print()
-        warn("WEBHOOK_BASE_URL не задан — чат-ответы бота отключены.")
-        info("Для включения: запусти ngrok http 8000, добавь URL в .env")
 
     _auto_sync_pending()
 

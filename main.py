@@ -23,7 +23,6 @@ import json
 import os
 import shutil
 import time
-from datetime import datetime
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.security import APIKeyHeader
@@ -32,7 +31,7 @@ from typing import Optional
 
 import recall_client
 import storage
-from config import SERVER_PORT, WEBHOOK_BASE_URL, MATERIALS_DIR
+from config import SERVER_PORT, MATERIALS_DIR
 
 API_KEY = os.environ.get("API_KEY", "")
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -83,9 +82,8 @@ def send_bot(req: SendBotRequest):
 
     Пример meeting_url: https://zoom.us/j/12345678901?pwd=abc123
     """
-    webhook_url = f"{WEBHOOK_BASE_URL}/webhook/chat" if WEBHOOK_BASE_URL else None
     try:
-        result = recall_client.send_bot(req.meeting_url, req.bot_name, webhook_url=webhook_url)
+        result = recall_client.send_bot(req.meeting_url, req.bot_name)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -338,103 +336,6 @@ def serve_file(filename: str):
     return FileResponse(file_path, filename=filename)
 
 
-# --- Webhook: real-time чат ---
-
-_processed_events: set = set()
-
-
-def _is_bot_mentioned(text: str, bot_name: str) -> bool:
-    prefix = text[:30].lower()
-    triggers = [bot_name.lower(), f"@{bot_name.lower()}"]
-    return any(prefix.startswith(t) for t in triggers)
-
-
-def _strip_mention(text: str, bot_name: str) -> str:
-    lower = text.lower()
-    for trigger in [f"@{bot_name.lower()}", bot_name.lower()]:
-        if lower.startswith(trigger):
-            text = text[len(trigger):].lstrip(" ,:")
-            break
-    return text.strip()
-
-
-def _format_material_response(materials: list[dict], sender_name: str) -> str:
-    lines = [f"{sender_name}, вот что я нашёл:"]
-    for i, m in enumerate(materials[:3], 1):
-        lines.append(f"\n{i}. {m['title']}")
-        if m.get("content"):
-            lines.append(f"   {m['content']}")
-        if m.get("url"):
-            lines.append(f"   {m['url']}")
-    result = "\n".join(lines)
-    return result[:4096]
-
-
-@app.post("/webhook/chat", summary="Webhook для входящих сообщений чата")
-def webhook_chat(payload: dict):
-    event = payload.get("event", "")
-    if event != "participant_events.chat_message":
-        return {"status": "ignored"}
-
-    data = payload.get("data", {}).get("data", {})
-    participant = data.get("participant", {})
-    message_data = data.get("data", {})
-    text = message_data.get("text", "")
-    sender_name = participant.get("name", "Unknown")
-    bot_info = payload.get("data", {}).get("bot", {})
-    bot_id = bot_info.get("id", "")
-
-    if not text or not bot_id:
-        return {"status": "ignored"}
-
-    event_key = f"{bot_id}:{sender_name}:{text[:50]}:{hash(str(data.get('timestamp', '')))}"
-    if event_key in _processed_events:
-        return {"status": "duplicate"}
-    _processed_events.add(event_key)
-    if len(_processed_events) > 1000:
-        _processed_events.clear()
-
-    meeting = storage.get_meeting(bot_id)
-    bot_name = meeting.get("bot_name", "Nechto Zoom Analytics") if meeting else "Nechto Zoom Analytics"
-    if sender_name.lower() == bot_name.lower():
-        return {"status": "self_message"}
-
-    if not _is_bot_mentioned(text, bot_name):
-        return {"status": "not_mentioned"}
-
-    broadcast_id = storage.get_broadcast_id_by_bot(bot_id)
-    clean_query = _strip_mention(text, bot_name)
-
-    if not broadcast_id:
-        reply = f"{sender_name}, этот бот не привязан к эфиру."
-    else:
-        results = storage.search_materials(broadcast_id, clean_query)
-        if results:
-            reply = _format_material_response(results, sender_name)
-        else:
-            broadcast = storage.get_broadcast(broadcast_id)
-            bname = broadcast["name"] if broadcast else "эфир"
-            all_materials = storage.get_materials(broadcast_id)
-            if all_materials:
-                reply = _format_material_response(all_materials, sender_name)
-            else:
-                reply = f"{sender_name}, материалы для эфира «{bname}» ещё не загружены."
-
-    to = message_data.get("to", "")
-    to_param = str(participant.get("id", "")) if to and to != "everyone" else None
-
-    try:
-        recall_client.send_chat_message(bot_id, reply, to=to_param)
-    except Exception:
-        pass
-
-    now = datetime.utcnow().isoformat()
-    storage.save_chat_message(bot_id, sender_name, text, now, False)
-    storage.save_chat_message(bot_id, bot_name, reply, now, False)
-
-    return {"status": "replied", "query": clean_query, "materials_found": len(results) if broadcast_id else 0}
-
-
 @app.get("/", summary="Информация о сервере")
 def root():
     return {
@@ -453,13 +354,14 @@ def root():
             "GET  /export/{bot_id}?format=json|csv",
             "POST /broadcasts",
             "GET  /broadcasts",
+            "DELETE /broadcasts/{broadcast_id}",
             "POST /materials/{broadcast_id}",
             "POST /materials/{broadcast_id}/upload",
             "GET  /materials/{broadcast_id}",
+            "DELETE /materials/{broadcast_id}/{material_id}",
             "GET  /files/{filename}",
-            "POST /webhook/chat",
         ],
-        "docs": "http://localhost:8000/docs",
+        "docs": "/docs",
     }
 
 
