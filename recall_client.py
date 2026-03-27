@@ -165,6 +165,42 @@ def get_recording_url(bot_id: str) -> Optional[str]:
     )
 
 
+def get_live_session_data(bot_id: str) -> dict:
+    """
+    Получить статус бота и события участников за один сеанс (для live-мониторинга).
+    Returns: {status_code, status_changes, participant_events}
+    """
+    bot = get_bot_status(bot_id)
+    changes = bot.get("status_changes", [])
+    status_code = changes[-1]["code"] if changes else "unknown"
+
+    participant_events = []
+    recordings = bot.get("recordings", [])
+    if recordings:
+        url = (
+            recordings[0]
+            .get("media_shortcuts", {})
+            .get("participant_events", {})
+            .get("data", {})
+            .get("participant_events_download_url")
+        )
+        if url:
+            try:
+                with httpx.Client(timeout=15) as client:
+                    r = client.get(url)
+                    if r.status_code == 200:
+                        data = r.json()
+                        participant_events = data if isinstance(data, list) else data.get("results", [])
+            except Exception:
+                pass
+
+    return {
+        "status_code": status_code,
+        "status_changes": changes,
+        "participant_events": participant_events,
+    }
+
+
 def list_bots() -> list[dict]:
     """Получить список всех запущенных ботов."""
     with httpx.Client(timeout=15) as client:

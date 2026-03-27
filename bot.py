@@ -265,6 +265,10 @@ def send_bot():
     print()
     warn("Бот появится в списке участников через ~15–30 секунд.")
     warn("Если встреча с Waiting Room — хост должен его впустить.")
+    print()
+    monitor_choice = ask("Запустить мониторинг встречи в реальном времени? (да / нет)")
+    if monitor_choice.lower() in ("да", "y", "yes", "д"):
+        live_monitor(bot_id)
 
 
 def check_status():
@@ -677,6 +681,140 @@ def manage_materials():
             warn("Введи цифру от 0 до 6.")
 
 
+def live_monitor(bot_id: str):
+    """Мониторинг встречи в реальном времени через polling Recall.ai API."""
+    POLL_INTERVAL = 12
+
+    seen_events: set = set()
+    log_entries: list = []
+    participant_count = 0
+    status_code = ""
+
+    def add_log(text: str):
+        ts = datetime.now(MSK).strftime("%H:%M:%S")
+        log_entries.append((ts, text))
+
+    def render():
+        print("\033[2J\033[H", end="", flush=True)
+        title = "LIVE МОНИТОРИНГ ВСТРЕЧИ"
+        dline()
+        pad = (W_ - len(title) - 2) // 2
+        print(c("║", C) + " " * pad + c(title, B, W) + " " * (W_ - pad - len(title) - 1) + c("║", C))
+        dline()
+
+        status_map = {
+            "joining_call":          (Y,  "Подключается..."),
+            "in_call_not_recording": (G,  "В встрече · ожидает запись"),
+            "in_call_recording":     (G,  "В встрече · запись идёт"),
+            "call_ended":            (Y,  "Встреча завершена, обрабатываю..."),
+            "done":                  (G,  "Данные обработаны"),
+            "fatal":                 (RE, "Ошибка подключения"),
+        }
+        scol, slabel = status_map.get(status_code, (D, status_code or "—"))
+
+        now_str = datetime.now(MSK).strftime("%H:%M:%S")
+        print()
+        print(f"  {c('Статус:', D)}    {c(slabel, scol, B)}")
+        print(f"  {c('Участников:', D)} {c(str(participant_count), W, B)} чел.")
+        print(f"  {c('Обновлено:', D)}  {c(now_str + ' МСК', D)}")
+        print()
+        line()
+        print(c("  Лента событий:", C, B))
+        line()
+        if log_entries:
+            for ts, text in log_entries[-16:]:
+                print(f"  {c(ts, D)}  {text}")
+        else:
+            print()
+            info("Ожидание событий...")
+            print()
+        print()
+        line()
+        print(c("  Ctrl+C — выйти из мониторинга (бот продолжит работу)", D))
+
+    add_log(f"{c('Мониторинг запущен', G)}  ·  Bot: {c(bot_id[:20], D)}")
+
+    try:
+        while True:
+            try:
+                live = recall_client.get_live_session_data(bot_id)
+                status_code = live.get("status_code", "unknown")
+                events = live.get("participant_events", [])
+
+                join_leave = [e for e in events if e.get("action") in ("join", "leave")]
+                chat_msgs  = [e for e in events if e.get("action") == "chat_message"]
+
+                count = 0
+                for ev in join_leave:
+                    name   = ev.get("participant", {}).get("name", "?")
+                    action = ev.get("action", "")
+                    ts_raw = ev.get("timestamp", {})
+                    if isinstance(ts_raw, dict):
+                        ts_raw = ts_raw.get("absolute", "")
+                    key = (name, action, str(ts_raw))
+                    if action == "join":
+                        count += 1
+                    else:
+                        count = max(0, count - 1)
+                    if key not in seen_events:
+                        seen_events.add(key)
+                        if action == "join":
+                            add_log(f"  +  {c(name[:28], W, B)}  {c('вошёл', G)}")
+                        else:
+                            add_log(f"  -  {c(name[:28], W)}  {c('вышел', D)}")
+
+                participant_count = count
+
+                for ev in chat_msgs:
+                    name   = ev.get("participant", {}).get("name", "?")
+                    text   = ev.get("data", {}).get("text", "")
+                    ts_raw = ev.get("timestamp", {})
+                    if isinstance(ts_raw, dict):
+                        ts_raw = ts_raw.get("absolute", "")
+                    key = ("chat", name, text[:50], str(ts_raw))
+                    if key not in seen_events and text:
+                        seen_events.add(key)
+                        add_log(f"  msg  {c(name[:16] + ':', B, W)} {text[:35]}")
+
+            except Exception as e:
+                add_log(f"{c('Ошибка API:', RE)} {str(e)[:38]}")
+
+            render()
+
+            if status_code == "done":
+                result = _fetch_and_save(bot_id)
+                if result:
+                    p_ev = result["participants"]
+                    jl   = [e for e in p_ev if e.get("action") in ("join", "leave")]
+                    ch   = [e for e in p_ev if e.get("action") == "chat_message"]
+                    names = len({e.get("participant", {}).get("name") for e in jl})
+                    add_log(f"{c('Данные сохранены:', G, B)} участников: {c(str(names), W, B)} · сообщений: {c(str(len(ch)), W, B)}")
+                render()
+                time.sleep(3)
+                break
+
+            if status_code == "fatal":
+                add_log(c("Бот завершил работу с ошибкой.", RE))
+                render()
+                time.sleep(3)
+                break
+
+            time.sleep(POLL_INTERVAL)
+
+    except KeyboardInterrupt:
+        pass
+
+    print()
+    print()
+    if status_code == "done":
+        ok("Встреча завершена, данные сохранены.")
+    elif status_code == "fatal":
+        err("Бот завершил работу с ошибкой.")
+    else:
+        info("Мониторинг остановлен. Бот продолжает работу.")
+    print()
+
+
 def _pick_bot() -> str:
     meetings = storage.list_meetings()
     if not meetings:
@@ -723,6 +861,7 @@ def main():
         print(c("  4", B, C) + c("  →  ", D) + c("Скачать запись (видео+аудио)", W))
         print(c("  5", B, C) + c("  →  ", D) + c("Остановить бота",              W))
         print(c("  6", B, C) + c("  →  ", D) + c("Материалы для эфира",          W))
+        print(c("  7", B, C) + c("  →  ", D) + c("Мониторинг встречи Live",      W))
         print(c("  0", B, D) + c("  →  ", D) + c("Выход",                        D))
         line()
 
@@ -734,13 +873,17 @@ def main():
         elif choice == "4": get_recording()
         elif choice == "5": stop_bot()
         elif choice == "6": manage_materials()
+        elif choice == "7":
+            bot_id = _pick_bot()
+            if bot_id:
+                live_monitor(bot_id)
         elif choice == "0":
             print()
             ok("До встречи!")
             print()
             break
         else:
-            warn("Введи цифру от 0 до 6.")
+            warn("Введи цифру от 0 до 7.")
 
 
 if __name__ == "__main__":
