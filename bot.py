@@ -196,6 +196,73 @@ def _auto_sync_pending():
         ok(f"Автосинхронизация: сохранены данные {synced} встреч(и)")
 
 
+# ── Фоновый мониторинг участников ─────────────────────────────
+
+_active_streams: dict = {}
+
+
+def _participant_stream_worker(bot_id: str, stop_event):
+    """Фоновый поток: уведомления о join/leave в терминале."""
+    seen_events: set = set()
+
+    while not stop_event.is_set():
+        try:
+            live = recall_client.get_live_session_data(bot_id)
+            status_code = live.get("status_code", "unknown")
+            events = live.get("participant_events", [])
+            join_leave = [e for e in events if e.get("action") in ("join", "leave")]
+
+            count = 0
+            for ev in join_leave:
+                name   = ev.get("participant", {}).get("name", "?")
+                action = ev.get("action", "")
+                ts_raw = ev.get("timestamp", {})
+                if isinstance(ts_raw, dict):
+                    ts_raw = ts_raw.get("absolute", "")
+                key = (name, action, str(ts_raw))
+                if action == "join":
+                    count += 1
+                else:
+                    count = max(0, count - 1)
+                if key not in seen_events:
+                    seen_events.add(key)
+                    if action == "join":
+                        print(f"\n  {c('+', G, B)} {c(name[:30], W, B)} {c('вошёл', G)} {c(f'[сейчас: {count}]', D)}")
+                    else:
+                        print(f"\n  {c('-', RE, B)} {c(name[:30], W)} {c('вышел', D)} {c(f'[сейчас: {count}]', D)}")
+
+            if status_code in ("done", "fatal"):
+                if status_code == "done":
+                    result = _fetch_and_save(bot_id)
+                    if result:
+                        p_ev = result["participants"]
+                        jl   = [e for e in p_ev if e.get("action") in ("join", "leave")]
+                        ch   = [e for e in p_ev if e.get("action") == "chat_message"]
+                        names = len({e.get("participant", {}).get("name") for e in jl})
+                        print(f"\n  {c('✓', G, B)} {c(f'Встреча завершена. Участников: {names} · Сообщений: {len(ch)}', W)}\n")
+                stop_event.set()
+                break
+
+        except Exception:
+            pass
+
+        stop_event.wait(timeout=12)
+
+    _active_streams.pop(bot_id, None)
+
+
+def start_participant_stream(bot_id: str):
+    """Запустить фоновый мониторинг join/leave. Уведомления выводятся в терминал."""
+    if bot_id in _active_streams:
+        warn("Мониторинг уже запущен для этого бота.")
+        return
+    stop_event = threading.Event()
+    _active_streams[bot_id] = stop_event
+    t = threading.Thread(target=_participant_stream_worker, args=(bot_id, stop_event), daemon=True)
+    t.start()
+    ok("Мониторинг участников запущен в фоне — уведомления появятся в терминале.")
+
+
 # ── Команды меню ───────────────────────────────────────────────
 
 def build_zoom_url(meeting_input: str, password: str) -> str:
@@ -266,9 +333,9 @@ def send_bot():
     warn("Бот появится в списке участников через ~15–30 секунд.")
     warn("Если встреча с Waiting Room — хост должен его впустить.")
     print()
-    monitor_choice = ask("Запустить мониторинг встречи в реальном времени? (да / нет)")
+    monitor_choice = ask("Запустить фоновый мониторинг участников? (да / нет)")
     if monitor_choice.lower() in ("да", "y", "yes", "д"):
-        live_monitor(bot_id)
+        start_participant_stream(bot_id)
 
 
 def check_status():
