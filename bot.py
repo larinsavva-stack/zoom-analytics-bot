@@ -5,6 +5,7 @@ Zoom Analytics Bot — простой интерфейс.
 
 from datetime import datetime, timezone, timedelta
 import json
+import logging
 import os
 import threading
 import time
@@ -13,6 +14,8 @@ import shutil
 import recall_client
 import storage
 from config import MATERIALS_DIR
+
+logger = logging.getLogger(__name__)
 
 storage.init_db()
 
@@ -28,7 +31,8 @@ def to_msk(ts_str: str) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(MSK).strftime("%d.%m.%Y  %H:%M:%S")
-    except Exception:
+    except Exception as e:
+        logger.debug("to_msk: не удалось распарсить '%s': %s", ts_str[:30], e)
         return ts_str[:19].replace("T", " ")
 
 def to_msk_short(ts_str: str) -> str:
@@ -40,7 +44,8 @@ def to_msk_short(ts_str: str) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(MSK).strftime("%d.%m  %H:%M")
-    except Exception:
+    except Exception as e:
+        logger.debug("to_msk_short: не удалось распарсить '%s': %s", ts_str[:30], e)
         return ts_str[:16]
 
 # ── Цвета (ANSI) ──────────────────────────────────────────────
@@ -92,7 +97,8 @@ def _fetch_and_save(bot_id: str) -> Optional[dict]:
     try:
         chat         = recall_client.get_chat_messages(bot_id)
         participants = recall_client.get_participant_events(bot_id)
-    except Exception:
+    except Exception as e:
+        logger.error("Recall.ai: не удалось загрузить данные бота %s: %s", bot_id, e)
         return None
 
     # JSON-бэкап (сырые данные, страховка)
@@ -104,8 +110,8 @@ def _fetch_and_save(bot_id: str) -> Optional[dict]:
                 {"bot_id": bot_id, "participants": participants, "chat": chat},
                 f, ensure_ascii=False, indent=2,
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Не удалось сохранить JSON-бэкап для %s: %s", bot_id, e)
 
     # Сохранить в SQLite
     chat_events = [e for e in participants if e.get("action") == "chat_message"]
@@ -161,24 +167,29 @@ def _watch_and_save(bot_id: str):
                 break
             elif code == "fatal":
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Фон: ошибка проверки статуса %s: %s", bot_id, e)
 
 
 def _auto_sync_pending():
     """
-    При запуске: найти встречи без сохранённых данных и засинхронизировать.
-    Страховка на случай если бот был закрыт до автосохранения.
+    При запуске: найти active встречи без сохранённых данных и засинхронизировать.
+    Запускается в фоновом потоке, не блокирует меню. Макс 5 встреч.
     """
     try:
         meetings = storage.list_meetings()
-    except Exception:
+    except Exception as e:
+        logger.warning("Автосинхронизация: не удалось получить список встреч: %s", e)
+        return
+
+    active = [m for m in meetings if m.get("status") == "active"][:5]
+    if not active:
         return
 
     synced = 0
-    for m in meetings:
+    for m in active:
         if storage.get_participant_events(m["bot_id"]):
-            continue  # уже сохранено
+            continue
         try:
             data    = recall_client.get_bot_status(m["bot_id"])
             changes = data.get("status_changes", [])
@@ -188,79 +199,12 @@ def _auto_sync_pending():
                 if result:
                     storage.end_meeting(m["bot_id"])
                     synced += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Автосинхронизация: ошибка синхронизации %s: %s", m["bot_id"], e)
 
     if synced:
         print()
         ok(f"Автосинхронизация: сохранены данные {synced} встреч(и)")
-
-
-# ── Фоновый мониторинг участников ─────────────────────────────
-
-_active_streams: dict = {}
-
-
-def _participant_stream_worker(bot_id: str, stop_event):
-    """Фоновый поток: уведомления о join/leave в терминале."""
-    seen_events: set = set()
-
-    while not stop_event.is_set():
-        try:
-            live = recall_client.get_live_session_data(bot_id)
-            status_code = live.get("status_code", "unknown")
-            events = live.get("participant_events", [])
-            join_leave = [e for e in events if e.get("action") in ("join", "leave")]
-
-            count = 0
-            for ev in join_leave:
-                name   = ev.get("participant", {}).get("name", "?")
-                action = ev.get("action", "")
-                ts_raw = ev.get("timestamp", {})
-                if isinstance(ts_raw, dict):
-                    ts_raw = ts_raw.get("absolute", "")
-                key = (name, action, str(ts_raw))
-                if action == "join":
-                    count += 1
-                else:
-                    count = max(0, count - 1)
-                if key not in seen_events:
-                    seen_events.add(key)
-                    if action == "join":
-                        print(f"\n  {c('+', G, B)} {c(name[:30], W, B)} {c('вошёл', G)} {c(f'[сейчас: {count}]', D)}")
-                    else:
-                        print(f"\n  {c('-', RE, B)} {c(name[:30], W)} {c('вышел', D)} {c(f'[сейчас: {count}]', D)}")
-
-            if status_code in ("done", "fatal"):
-                if status_code == "done":
-                    result = _fetch_and_save(bot_id)
-                    if result:
-                        p_ev = result["participants"]
-                        jl   = [e for e in p_ev if e.get("action") in ("join", "leave")]
-                        ch   = [e for e in p_ev if e.get("action") == "chat_message"]
-                        names = len({e.get("participant", {}).get("name") for e in jl})
-                        print(f"\n  {c('✓', G, B)} {c(f'Встреча завершена. Участников: {names} · Сообщений: {len(ch)}', W)}\n")
-                stop_event.set()
-                break
-
-        except Exception:
-            pass
-
-        stop_event.wait(timeout=12)
-
-    _active_streams.pop(bot_id, None)
-
-
-def start_participant_stream(bot_id: str):
-    """Запустить фоновый мониторинг join/leave. Уведомления выводятся в терминал."""
-    if bot_id in _active_streams:
-        warn("Мониторинг уже запущен для этого бота.")
-        return
-    stop_event = threading.Event()
-    _active_streams[bot_id] = stop_event
-    t = threading.Thread(target=_participant_stream_worker, args=(bot_id, stop_event), daemon=True)
-    t.start()
-    ok("Мониторинг участников запущен в фоне — уведомления появятся в терминале.")
 
 
 # ── Команды меню ───────────────────────────────────────────────
@@ -332,10 +276,6 @@ def send_bot():
     print()
     warn("Бот появится в списке участников через ~15–30 секунд.")
     warn("Если встреча с Waiting Room — хост должен его впустить.")
-    print()
-    monitor_choice = ask("Запустить фоновый мониторинг участников? (да / нет)")
-    if monitor_choice.lower() in ("да", "y", "yes", "д"):
-        start_participant_stream(bot_id)
 
 
 def check_status():
@@ -406,7 +346,8 @@ def show_participant_chart(join_leave: list):
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             dt = dt.astimezone(MSK)
-        except Exception:
+        except Exception as e:
+            logger.debug("График: не удалось распарсить timestamp: %s", e)
             continue
         if action == "join":
             count += 1
@@ -430,7 +371,8 @@ def show_participant_chart(join_leave: list):
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 dt = dt.astimezone(MSK)
-            except Exception:
+            except Exception as e:
+                logger.debug("График (count_at): не удалось распарсить timestamp: %s", e)
                 continue
             if dt <= target_dt:
                 if ev.get("action") == "join":
@@ -544,8 +486,8 @@ def sync_and_show():
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 timeline.append((dt.astimezone(MSK), count))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Не удалось распарсить timestamp в таймлайне: %s", e)
 
         show_participant_chart(join_leave)
     else:
@@ -779,175 +721,6 @@ def manage_materials():
             warn("Введи цифру от 0 до 6.")
 
 
-def live_monitor(bot_id: str):
-    """Мониторинг встречи в реальном времени через polling Recall.ai API."""
-    POLL_INTERVAL = 12
-    STATUS_INTERVAL = 30
-
-    seen_events: set = set()
-    log_entries: list = []
-    participant_count = 0
-    chat_count = 0
-    status_code = ""
-    start_time = datetime.now(MSK)
-    last_status_time = time.time()
-
-    def add_log(text: str):
-        ts = datetime.now(MSK).strftime("%H:%M:%S")
-        log_entries.append((ts, text))
-
-    def render():
-        print("\033[2J\033[H", end="", flush=True)
-        title = "LIVE МОНИТОРИНГ ВСТРЕЧИ"
-        dline()
-        pad = (W_ - len(title) - 2) // 2
-        print(c("║", C) + " " * pad + c(title, B, W) + " " * (W_ - pad - len(title) - 1) + c("║", C))
-        dline()
-
-        status_map = {
-            "joining_call":          (Y,  "Подключается..."),
-            "in_call_not_recording": (G,  "В встрече · ожидает запись"),
-            "in_call_recording":     (G,  "В встрече · запись идёт"),
-            "call_ended":            (Y,  "Встреча завершена, обрабатываю..."),
-            "done":                  (G,  "Данные обработаны"),
-            "fatal":                 (RE, "Ошибка подключения"),
-        }
-        scol, slabel = status_map.get(status_code, (D, status_code or "—"))
-
-        now_str = datetime.now(MSK).strftime("%H:%M:%S")
-        print()
-        print(f"  {c('Статус:', D)}    {c(slabel, scol, B)}")
-        print(f"  {c('Участников:', D)} {c(str(participant_count), W, B)} чел.")
-        print(f"  {c('Обновлено:', D)}  {c(now_str + ' МСК', D)}")
-        print()
-        line()
-        print(c("  Лента событий:", C, B))
-        line()
-        if log_entries:
-            for ts, text in log_entries[-16:]:
-                print(f"  {c(ts, D)}  {text}")
-        else:
-            print()
-            info("Ожидание событий...")
-            print()
-        print()
-        line()
-        print(c("  Ctrl+C — выйти из мониторинга (бот продолжит работу)", D))
-
-    add_log(f"{c('Мониторинг запущен', G)}  ·  Bot: {c(bot_id[:20], D)}")
-    _final_join_leave = None
-
-    try:
-        while True:
-            try:
-                live = recall_client.get_live_session_data(bot_id)
-                status_code = live.get("status_code", "unknown")
-                events = live.get("participant_events", [])
-
-                join_leave = [e for e in events if e.get("action") in ("join", "leave")]
-                chat_msgs  = [e for e in events if e.get("action") == "chat_message"]
-
-                count = 0
-                for ev in join_leave:
-                    name   = ev.get("participant", {}).get("name", "?")
-                    action = ev.get("action", "")
-                    ts_raw = ev.get("timestamp", {})
-                    if isinstance(ts_raw, dict):
-                        ts_raw = ts_raw.get("absolute", "")
-                    key = (name, action, str(ts_raw))
-                    if action == "join":
-                        count += 1
-                    else:
-                        count = max(0, count - 1)
-                    if key not in seen_events:
-                        seen_events.add(key)
-                        if action == "join":
-                            add_log(f"  +  {c(name[:28], W, B)}  {c('вошёл', G)}")
-                        else:
-                            add_log(f"  -  {c(name[:28], W)}  {c('вышел', D)}")
-
-                participant_count = count
-
-                for ev in chat_msgs:
-                    name   = ev.get("participant", {}).get("name", "?")
-                    text   = ev.get("data", {}).get("text", "")
-                    to     = ev.get("data", {}).get("to", "everyone")
-                    ts_raw = ev.get("timestamp", {})
-                    if isinstance(ts_raw, dict):
-                        ts_raw = ts_raw.get("absolute", "")
-                    key = ("chat", name, str(ts_raw))
-                    if key not in seen_events and text:
-                        seen_events.add(key)
-                        chat_count += 1
-                        try:
-                            ts_str = str(ts_raw).replace("Z", "+00:00")
-                            dt_ev  = datetime.fromisoformat(ts_str)
-                            if dt_ev.tzinfo is None:
-                                dt_ev = dt_ev.replace(tzinfo=timezone.utc)
-                            time_label = dt_ev.astimezone(MSK).strftime("%H:%M")
-                        except Exception:
-                            time_label = "—:—"
-                        private_tag = c(" [приватное]", Y) if to != "everyone" else ""
-                        log_entries.append((time_label, f"{c(name[:20] + ':', B, W)} {text}{private_tag}"))
-
-            except Exception as e:
-                add_log(f"{c('Ошибка API:', RE)} {str(e)[:38]}")
-
-            now_ts = time.time()
-            if now_ts - last_status_time >= STATUS_INTERVAL:
-                last_status_time = now_ts
-                now_str = datetime.now(MSK).strftime("%H:%M")
-                elapsed = int((datetime.now(MSK) - start_time).total_seconds())
-                mins, secs = divmod(elapsed, 60)
-                dur_str = f"{mins:02d}:{secs:02d}" if elapsed < 3600 else f"{elapsed//3600:02d}:{mins%60:02d}:{secs:02d}"
-                bar = (
-                    f"{c('──', D)} {c(now_str, C, B)} {c('│', D)} "
-                    f"{c('Участников:', D)} {c(str(participant_count), W, B)} {c('│', D)} "
-                    f"{c('Сообщений:', D)} {c(str(chat_count), W, B)} {c('│', D)} "
-                    f"{c('Длительность:', D)} {c(dur_str, W, B)} {c('──', D)}"
-                )
-                log_entries.append(("", bar))
-
-            render()
-
-            if status_code == "done":
-                result = _fetch_and_save(bot_id)
-                if result:
-                    p_ev = result["participants"]
-                    jl   = [e for e in p_ev if e.get("action") in ("join", "leave")]
-                    ch   = [e for e in p_ev if e.get("action") == "chat_message"]
-                    names = len({e.get("participant", {}).get("name") for e in jl})
-                    _final_join_leave = jl
-                    add_log(f"{c('Данные сохранены:', G, B)} участников: {c(str(names), W, B)} · сообщений: {c(str(len(ch)), W, B)}")
-                render()
-                time.sleep(3)
-                break
-
-            if status_code == "fatal":
-                add_log(c("Бот завершил работу с ошибкой.", RE))
-                render()
-                time.sleep(3)
-                break
-
-            time.sleep(POLL_INTERVAL)
-
-    except KeyboardInterrupt:
-        pass
-
-    print()
-    print()
-    if status_code == "done":
-        ok("Встреча завершена, данные сохранены.")
-    elif status_code == "fatal":
-        err("Бот завершил работу с ошибкой.")
-    else:
-        info("Мониторинг остановлен. Бот продолжает работу.")
-    print()
-
-    if _final_join_leave:
-        show_participant_chart(_final_join_leave)
-
-
 def _pick_bot() -> str:
     meetings = storage.list_meetings()
     if not meetings:
@@ -983,7 +756,8 @@ def main():
     print(c("║", C) + c("                  Время: МСК (UTC+3)                ", D) + c("║", C))
     dline()
 
-    _auto_sync_pending()
+    info("Автосинхронизация пропущенных встреч запущена в фоне...")
+    threading.Thread(target=_auto_sync_pending, daemon=True).start()
 
     while True:
         print()
@@ -994,7 +768,6 @@ def main():
         print(c("  4", B, C) + c("  →  ", D) + c("Скачать запись (видео+аудио)", W))
         print(c("  5", B, C) + c("  →  ", D) + c("Остановить бота",              W))
         print(c("  6", B, C) + c("  →  ", D) + c("Материалы для эфира",          W))
-        print(c("  7", B, C) + c("  →  ", D) + c("Мониторинг встречи Live",      W))
         print(c("  0", B, D) + c("  →  ", D) + c("Выход",                        D))
         line()
 
@@ -1006,17 +779,13 @@ def main():
         elif choice == "4": get_recording()
         elif choice == "5": stop_bot()
         elif choice == "6": manage_materials()
-        elif choice == "7":
-            bot_id = _pick_bot()
-            if bot_id:
-                live_monitor(bot_id)
         elif choice == "0":
             print()
             ok("До встречи!")
             print()
             break
         else:
-            warn("Введи цифру от 0 до 7.")
+            warn("Введи цифру от 0 до 6.")
 
 
 if __name__ == "__main__":
