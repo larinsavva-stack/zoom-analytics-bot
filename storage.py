@@ -2,12 +2,15 @@
 SQLite хранилище для данных встреч: чат, участники, сессии.
 """
 
+import os
 import sqlite3
 import json
 from datetime import datetime
 from contextlib import contextmanager
 from typing import Optional
 from config import DB_PATH
+
+os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
 
 
 @contextmanager
@@ -96,6 +99,24 @@ def create_meeting(bot_id: str, meeting_url: str, bot_name: str, broadcast_id: O
             (bot_id, meeting_url, bot_name, datetime.utcnow().isoformat(), broadcast_id),
         )
         return cur.lastrowid
+
+
+def get_meetings_by_broadcast(broadcast_id: int) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM meetings WHERE broadcast_id = ? ORDER BY started_at DESC",
+            (broadcast_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_active_meeting_by_url(meeting_url: str) -> Optional[dict]:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM meetings WHERE meeting_url = ? AND status = 'active'",
+            (meeting_url,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def end_meeting(bot_id: str):
@@ -352,3 +373,53 @@ def sync_from_recall(bot_id: str, chat_data: list, participant_data: list):
             ts = ev.get("timestamp") or ev.get("ts") or ev.get("created_at") or datetime.utcnow().isoformat()
             ts = str(ts)
             save_participant_event(bot_id, name, pid, event_type, ts)
+
+
+def get_latest_ended_meeting(hours: int = 48) -> Optional[dict]:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM meetings WHERE status = 'ended' AND ended_at > datetime('now', ?) ORDER BY ended_at DESC LIMIT 1",
+            (f"-{hours} hours",),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_peak_participants(bot_id: str) -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT MAX(participant_count) FROM participant_events WHERE bot_id = ?",
+            (bot_id,),
+        ).fetchone()
+        return row[0] if row and row[0] else 0
+
+
+def get_end_participants(bot_id: str) -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT participant_count FROM participant_events WHERE bot_id = ? ORDER BY timestamp DESC LIMIT 1",
+            (bot_id,),
+        ).fetchone()
+        return row[0] if row and row[0] else 0
+
+
+def get_filtered_chat(bot_id: str, exclude_names: set[str] = None) -> list[dict]:
+    import re
+    messages = get_chat_messages(bot_id)
+    filtered = []
+    emoji_pattern = re.compile(
+        r'^[\U0001f600-\U0001f64f\U0001f300-\U0001f5ff\U0001f680-\U0001f6ff'
+        r'\U0001f1e0-\U0001f1ff\U00002702-\U000027b0\U0000fe0f'
+        r'\U0001f900-\U0001f9ff\U0001fa00-\U0001fa6f\U0001fa70-\U0001faff'
+        r'\U00002600-\U000026ff\u200d\u2764\u2665\U00002b50\U0001f525'
+        r'\U0001f44d\U0001f44f\U0001f64f\U00002705\U0000274c\s]+$'
+    )
+    for msg in messages:
+        if exclude_names and msg.get("sender_name") in exclude_names:
+            continue
+        if msg.get("is_private"):
+            continue
+        text = (msg.get("message") or "").strip()
+        if not text or emoji_pattern.match(text):
+            continue
+        filtered.append(msg)
+    return filtered

@@ -31,7 +31,7 @@ from typing import Optional
 
 import recall_client
 import storage
-from config import SERVER_PORT, MATERIALS_DIR
+from config import SERVER_PORT, MATERIALS_DIR, WEBHOOK_BASE_URL
 
 API_KEY = os.environ.get("API_KEY", "")
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -82,6 +82,13 @@ def send_bot(req: SendBotRequest):
 
     Пример meeting_url: https://zoom.us/j/12345678901?pwd=abc123
     """
+    existing = storage.get_active_meeting_by_url(req.meeting_url)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Бот уже на этой встрече (ID: {existing['bot_id']})",
+        )
+
     try:
         result = recall_client.send_bot(req.meeting_url, req.bot_name)
     except Exception as e:
@@ -334,6 +341,46 @@ def serve_file(filename: str):
     if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="Файл не найден")
     return FileResponse(file_path, filename=filename)
+
+
+STAFF_NAMES = {"Кристина Удинеева", "Наташа Базунова", "Анастасия Комаренко"}
+
+
+@app.get("/latest-meeting-data", summary="Данные последнего эфира для автоматизации", dependencies=[Depends(_check_api_key)])
+def latest_meeting_data(hours: int = 48):
+    """
+    Возвращает агрегированные данные последнего завершённого meeting:
+    - peak_participants: пик участников
+    - end_participants: участники на конец
+    - chat: отфильтрованный чат (без сотрудников, без emoji-only)
+    """
+    meeting = storage.get_latest_ended_meeting(hours)
+    if not meeting:
+        raise HTTPException(status_code=404, detail=f"Нет завершённых встреч за последние {hours}ч")
+
+    bot_id = meeting["bot_id"]
+
+    # Автосинхронизация: подтянуть свежие данные из Recall.ai если чат пуст
+    existing_chat = storage.get_chat_messages(bot_id)
+    if not existing_chat:
+        try:
+            chat = recall_client.get_chat_messages(bot_id)
+            participants = recall_client.get_participant_events(bot_id)
+            storage.sync_from_recall(bot_id, chat, participants)
+        except Exception:
+            pass
+
+    return {
+        "meeting": {
+            "bot_id": bot_id,
+            "meeting_url": meeting["meeting_url"],
+            "started_at": meeting["started_at"],
+            "ended_at": meeting["ended_at"],
+        },
+        "peak_participants": storage.get_peak_participants(bot_id),
+        "end_participants": storage.get_end_participants(bot_id),
+        "chat": storage.get_filtered_chat(bot_id, exclude_names=STAFF_NAMES),
+    }
 
 
 @app.get("/", summary="Информация о сервере")
