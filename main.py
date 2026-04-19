@@ -151,11 +151,14 @@ def stop_bot(bot_id: str):
 
 
 @app.post("/sync/{bot_id}", summary="Синхронизировать данные из Recall.ai", dependencies=[Depends(_check_api_key)])
-def sync_data(bot_id: str):
+def sync_data(bot_id: str, force: bool = False):
     """
     Подтягивает чат и события участников из Recall.ai в локальную БД.
-    Вызывать после завершения встречи или для обновления данных.
+    ?force=true — удалить старые данные и пересинхронизировать.
     """
+    if force:
+        storage.clear_meeting_data(bot_id)
+
     try:
         chat = recall_client.get_chat_messages(bot_id)
         participants = recall_client.get_participant_events(bot_id)

@@ -127,6 +127,12 @@ def end_meeting(bot_id: str):
         )
 
 
+def clear_meeting_data(bot_id: str):
+    with get_db() as conn:
+        conn.execute("DELETE FROM participant_events WHERE bot_id = ?", (bot_id,))
+        conn.execute("DELETE FROM chat_messages WHERE bot_id = ?", (bot_id,))
+
+
 def get_meeting(bot_id: str) -> Optional[dict]:
     with get_db() as conn:
         row = conn.execute(
