@@ -336,30 +336,30 @@ def get_broadcast_id_by_bot(bot_id: str) -> Optional[int]:
         return row[0] if row and row[0] else None
 
 
+def _extract_timestamp(ev: dict) -> str:
+    ts = ev.get("timestamp", {})
+    if isinstance(ts, dict):
+        return ts.get("absolute", "")
+    return str(ts) if ts else ""
+
+
 def sync_from_recall(bot_id: str, chat_data: list, participant_data: list):
     """
     Синхронизировать данные из Recall.ai API в локальную БД.
-    Вызывать после завершения встречи или для обновления.
+    Логика идентична bot.py._fetch_and_save():
+    - chat_data: уже отфильтрованные сообщения из recall_client.get_chat_messages()
+    - participant_data: сырые события из recall_client.get_participant_events()
     """
-    # Чат
+    # Чат (из recall_client.get_chat_messages — уже в формате sender_name/message/sent_at)
     for msg in chat_data:
-        sender = msg.get("participant_name") or msg.get("sender", "Unknown")
-        text = msg.get("text", "")
-        sent_at = msg.get("created_at") or msg.get("timestamp", "")
-        is_private = msg.get("to") not in (None, "everyone", "")
-        # Пропустить дубликаты
-        with get_db() as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM chat_messages WHERE bot_id = ? AND sender_name = ? AND sent_at = ?",
-                (bot_id, sender, sent_at)
-            ).fetchone()
-            if not exists and text:
-                conn.execute(
-                    "INSERT INTO chat_messages (bot_id, sender_name, message, sent_at, is_private) VALUES (?, ?, ?, ?, ?)",
-                    (bot_id, sender, text, sent_at, int(is_private)),
-                )
+        sender = msg.get("sender_name", "Unknown")
+        text = msg.get("message", "")
+        sent_at = msg.get("sent_at", "")
+        is_private = msg.get("is_private", False)
+        if text:
+            save_chat_message(bot_id, sender, text, sent_at, is_private)
 
-    # Участники
+    # Участники — фильтруем только join/leave из participant_data
     with get_db() as conn:
         existing = conn.execute(
             "SELECT COUNT(*) FROM participant_events WHERE bot_id = ?", (bot_id,)
@@ -367,12 +367,14 @@ def sync_from_recall(bot_id: str, chat_data: list, participant_data: list):
 
     if not existing:
         for ev in participant_data:
-            name = str(ev.get("participant", {}).get("name") or ev.get("name") or "Unknown")
-            pid = str(ev.get("participant", {}).get("id") or ev.get("id") or "")
-            event_type = str(ev.get("event") or ev.get("type") or "joined")
-            ts = ev.get("timestamp") or ev.get("ts") or ev.get("created_at") or datetime.utcnow().isoformat()
-            ts = str(ts)
-            save_participant_event(bot_id, name, pid, event_type, ts)
+            action = ev.get("action", "")
+            if action not in ("join", "leave"):
+                continue
+            participant = ev.get("participant", {})
+            name = participant.get("name", "Unknown")
+            pid = str(participant.get("id", ""))
+            ts = _extract_timestamp(ev)
+            save_participant_event(bot_id, name, pid, action, ts)
 
 
 def get_latest_ended_meeting(hours: int = 48) -> Optional[dict]:
@@ -385,21 +387,31 @@ def get_latest_ended_meeting(hours: int = 48) -> Optional[dict]:
 
 
 def get_peak_participants(bot_id: str) -> int:
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT MAX(participant_count) FROM participant_events WHERE bot_id = ?",
-            (bot_id,),
-        ).fetchone()
-        return row[0] if row and row[0] else 0
+    events = get_participant_events(bot_id)
+    current = set()
+    peak = 0
+    for ev in events:
+        name = ev.get("participant_name", "")
+        event = ev.get("event", "")
+        if event == "join":
+            current.add(name)
+        elif event == "leave":
+            current.discard(name)
+        peak = max(peak, len(current))
+    return peak
 
 
 def get_end_participants(bot_id: str) -> int:
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT participant_count FROM participant_events WHERE bot_id = ? ORDER BY timestamp DESC LIMIT 1",
-            (bot_id,),
-        ).fetchone()
-        return row[0] if row and row[0] else 0
+    events = get_participant_events(bot_id)
+    current = set()
+    for ev in events:
+        name = ev.get("participant_name", "")
+        event = ev.get("event", "")
+        if event == "join":
+            current.add(name)
+        elif event == "leave":
+            current.discard(name)
+    return len(current)
 
 
 def get_filtered_chat(bot_id: str, exclude_names: set[str] = None) -> list[dict]:

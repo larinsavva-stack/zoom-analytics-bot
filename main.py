@@ -60,6 +60,7 @@ class SendBotRequest(BaseModel):
     meeting_url: str
     bot_name: Optional[str] = None
     broadcast_id: Optional[int] = None
+    broadcast_name: Optional[str] = None
 
 
 class BroadcastRequest(BaseModel):
@@ -96,10 +97,16 @@ def send_bot(req: SendBotRequest):
 
     bot_id = result["id"]
     bot_name = req.bot_name or result.get("bot_name", "Analytics Bot")
-    storage.create_meeting(bot_id, req.meeting_url, bot_name, broadcast_id=req.broadcast_id)
+
+    broadcast_id = req.broadcast_id
+    if not broadcast_id and req.broadcast_name:
+        broadcast_id = storage.create_broadcast(req.broadcast_name)
+
+    storage.create_meeting(bot_id, req.meeting_url, bot_name, broadcast_id=broadcast_id)
 
     return {
         "bot_id": bot_id,
+        "broadcast_id": broadcast_id,
         "status": result.get("status_changes", [{}])[-1].get("code", "joining"),
         "message": f"Бот '{bot_name}' отправлен на встречу. Bot ID: {bot_id}",
     }
@@ -157,9 +164,13 @@ def sync_data(bot_id: str):
 
     storage.sync_from_recall(bot_id, chat, participants)
 
+    meeting = storage.get_meeting(bot_id)
+    if meeting and meeting.get("status") == "active":
+        storage.end_meeting(bot_id)
+
     return {
         "synced_chat_messages": len(chat),
-        "synced_participant_events": len(participants),
+        "synced_participant_events": len([e for e in participants if e.get("action") in ("join", "leave")]),
     }
 
 
